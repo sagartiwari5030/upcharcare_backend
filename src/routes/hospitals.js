@@ -64,11 +64,15 @@ router.get("/:id", async (req, res) => {
   });
 });
 
-// POST /api/hospitals — register a new hospital. Any authenticated user
-// can submit one; it starts as "pending" until an admin approves it
-// (see routes/admin.js). The submitting user is linked as its owner.
-// Accepts optional latitude/longitude — required for the hospital to
-// ever show up in nearby-hospital search (see toLocationWKT above).
+// POST /api/hospitals — creates a hospital. Two callers, two behaviors:
+// - A hospital self-registering (role: patient/hospital_staff) → starts
+//   "pending" until an admin approves it, and THEY get linked as that
+//   hospital's staff.
+// - An admin creating a hospital directly (e.g. onboarding one by phone)
+//   → goes straight to "approved" (no need to self-approve), and their
+//   OWN account is left untouched — critically, an admin's role must
+//   never get silently downgraded to hospital_staff just because they
+//   used this endpoint on someone else's behalf.
 router.post("/", requireAuth, async (req, res) => {
   const {
     name, registration_number, hospital_type, address, city, state, pincode,
@@ -77,6 +81,8 @@ router.post("/", requireAuth, async (req, res) => {
   } = req.body;
 
   if (!name) return res.status(400).json({ error: "name is required" });
+
+  const isAdmin = req.profile.role === "admin";
 
   const { data, error } = await supabaseAdmin
     .from("hospitals")
@@ -95,15 +101,18 @@ router.post("/", requireAuth, async (req, res) => {
       has_blood_bank: has_blood_bank ?? false,
       location: toLocationWKT(latitude, longitude),
       created_by: req.profile.id,
-      verification_status: "pending",
+      verification_status: isAdmin ? "approved" : "pending",
     })
     .select()
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
 
-  // Link the submitting user's profile to this hospital as staff.
-  await supabaseAdmin.from("profiles").update({ role: "hospital_staff", hospital_id: data.id }).eq("id", req.profile.id);
+  // Only link the SUBMITTER as staff when they're a hospital
+  // self-registering — never touch an admin's own role/profile here.
+  if (!isAdmin) {
+    await supabaseAdmin.from("profiles").update({ role: "hospital_staff", hospital_id: data.id }).eq("id", req.profile.id);
+  }
 
   res.status(201).json(data);
 });
